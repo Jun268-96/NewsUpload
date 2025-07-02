@@ -41,21 +41,14 @@ st.caption("초등학교 고학년 대상 교실용 뉴스 큐레이션 플랫�
 
 # --- 핵심 변경점 2: Google Sheets에 연결하고 데이터 불러오기 ---
 # Create a connection object.
-conn = st.connection("gsheets", type=GSheetsConnection)
+conn = st.connection("gcp_service_account", type=GSheetsConnection)
 # 기존 데이터를 DataFrame으로 읽어오기
-try:
-    existing_data = conn.read(worksheet="Sheet1", usecols=list(range(6)), ttl=5)
-    # 빈 행 제거
-    existing_data = existing_data.dropna(how="all")
-    # 컬럼명이 없을 경우 기본 컬럼명 설정
-    if existing_data.empty or existing_data.columns.tolist()[0] != 'id':
-        existing_data.columns = ['id', 'url', 'title', 'image_url', 'category', 'added_date']
-    # DataFrame을 딕셔너리 리스트로 변환 (기존 코드와 호환을 위해)
-    news_list = existing_data.to_dict('records')
-except Exception as e:
-    st.error(f"Google Sheets 연결 오류: {e}")
-    existing_data = pd.DataFrame(columns=['id', 'url', 'title', 'image_url', 'category', 'added_date'])
-    news_list = []
+existing_data = conn.read(worksheet="Sheet1", usecols=list(range(6)), ttl=5)
+# 빈 행 제거
+existing_data = existing_data.dropna(how="all")
+
+# DataFrame을 딕셔너리 리스트로 변환 (기존 코드와 호환을 위해)
+news_list = existing_data.to_dict('records')
 
 
 # --- 7.1 뉴스 등록 시나리오 ---
@@ -80,13 +73,11 @@ with st.expander("📰 새 뉴스 추가하기"):
                 }
                 
                 # --- 핵심 변경점 3: Google Sheets에 새 행 추가하기 ---
-                try:
-                    updated_df = pd.DataFrame([new_article])
-                    conn.update(worksheet="Sheet1", data=pd.concat([existing_data, updated_df], ignore_index=True))
-                    st.success(f"'{metadata['title']}' 뉴스를 성공적으로 등록했습니다!")
-                    st.rerun() # 화면 새로고침
-                except Exception as e:
-                    st.error(f"뉴스 등록 중 오류가 발생했습니다: {e}")
+                updated_df = pd.DataFrame([new_article])
+                conn.update(worksheet="Sheet1", data=pd.concat([existing_data, updated_df], ignore_index=True))
+                
+                st.success(f"'{metadata['title']}' 뉴스를 성공적으로 등록했습니다!")
+                st.rerun() # 화면 새로고침
             else:
                 st.error("뉴스 정보를 가져오는데 실패했습니다. URL을 확인해주세요.")
 
@@ -127,13 +118,10 @@ else:
                     with col2:
                         # --- 핵심 변경점 4: 삭제 로직 수정 ---
                         if st.button("삭제", key=f"del_{news['id']}", type="secondary", use_container_width=True):
-                            try:
-                                news_to_delete_id = news['id']
-                                # 삭제할 행을 제외한 새로운 DataFrame 생성
-                                updated_data = existing_data[existing_data['id'] != news_to_delete_id]
-                                # 전체 시트 덮어쓰기
-                                conn.update(worksheet="Sheet1", data=updated_data)
-                                st.success("뉴스를 삭제했습니다.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"삭제 중 오류가 발생했습니다: {e}")
+                            news_to_delete_id = news['id']
+                            # 삭제할 행을 제외한 새로운 DataFrame 생성
+                            updated_data = existing_data[existing_data['id'] != news_to_delete_id]
+                            # 전체 시트 덮어쓰기
+                            conn.update(worksheet="Sheet1", data=updated_data)
+                            st.success("뉴스를 삭제했습니다.")
+                            st.rerun()
