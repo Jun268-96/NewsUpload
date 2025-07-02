@@ -3,13 +3,11 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import uuid
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
+import pandas as pd
 
-# --- PRD 5. 기술 요구사항 & 9. 제약사항 관련 ---
-# PRD는 서버 없는 로컬 스토리지를 명시했으나, 이 프로토타입은 Streamlit의 서버 기반 세션 상태를 활용합니다.
-# st.session_state는 사용자의 브라우저 세션 동안 데이터를 메모리에 저장하는 역할을 합니다.
-if 'news_list' not in st.session_state:
-    st.session_state.news_list = []
+# --- 핵심 변경점 1: Google Sheets Connection 설정 ---
+from streamlit_gsheets import GSheetsConnection
 
 # --- PRD 3.1 & 4.2 관련 ---
 CATEGORIES = {
@@ -20,48 +18,45 @@ CATEGORIES = {
     "세계": "red"
 }
 
-# --- PRD 3.1.3 메타데이터 추출 기능 ---
+# --- PRD 3.1.3 메타데이터 추출 기능 (기존과 동일) ---
 def fetch_metadata(url):
-    """URL에서 뉴스 메타데이터(제목, 설명, 이미지)를 추출합니다."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-
         soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Open Graph 태그 우선 탐색
         title = soup.find('meta', property='og:title')
-        description = soup.find('meta', property='og:description')
         image_url = soup.find('meta', property='og:image')
-
-        # OG 태그가 없을 경우 대체 탐색
         title = title['content'] if title else soup.title.string
-        description = description['content'] if description else ''
         if image_url:
-            image_url = image_url['content']
-        else:
-            # 기본 이미지 탐색 (첫 번째 의미 있는 이미지)
-            first_img = soup.find('img')
-            if first_img and first_img.get('src'):
-                # 상대 경로를 절대 경로로 변환
-                image_url = urljoin(url, first_img['src'])
-
-        return {
-            "title": title.strip() if title else "제목을 찾을 수 없습니다",
-            "description": description.strip() if description else "설명을 찾을 수 없습니다",
-            "image_url": image_url,
-            "success": True
-        }
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"URL에 접근할 수 없습니다: {e}"}
-    except Exception as e:
-        return {"success": False, "error": f"메타데이터 추출 중 오류 발생: {e}"}
+            image_url = urljoin(url, image_url['content'])
+        return {"title": title.strip() if title else "제목을 찾을 수 없습니다", "image_url": image_url, "success": True}
+    except Exception:
+        return {"success": False}
 
 # --- 1. 프로젝트 개요 & 6. 화면 구성 ---
 st.set_page_config(layout="wide", page_title="EduNews Board")
 st.title("👨‍🏫 EduNews Board")
 st.caption("초등학교 고학년 대상 교실용 뉴스 큐레이션 플랫폼")
+
+# --- 핵심 변경점 2: Google Sheets에 연결하고 데이터 불러오기 ---
+# Create a connection object.
+conn = st.connection("gsheets", type=GSheetsConnection)
+# 기존 데이터를 DataFrame으로 읽어오기
+try:
+    existing_data = conn.read(worksheet="Sheet1", usecols=list(range(6)), ttl=5)
+    # 빈 행 제거
+    existing_data = existing_data.dropna(how="all")
+    # 컬럼명이 없을 경우 기본 컬럼명 설정
+    if existing_data.empty or existing_data.columns.tolist()[0] != 'id':
+        existing_data.columns = ['id', 'url', 'title', 'image_url', 'category', 'added_date']
+    # DataFrame을 딕셔너리 리스트로 변환 (기존 코드와 호환을 위해)
+    news_list = existing_data.to_dict('records')
+except Exception as e:
+    st.error(f"Google Sheets 연결 오류: {e}")
+    existing_data = pd.DataFrame(columns=['id', 'url', 'title', 'image_url', 'category', 'added_date'])
+    news_list = []
+
 
 # --- 7.1 뉴스 등록 시나리오 ---
 with st.expander("📰 새 뉴스 추가하기"):
@@ -75,64 +70,70 @@ with st.expander("📰 새 뉴스 추가하기"):
                 metadata = fetch_metadata(news_url)
 
             if metadata["success"]:
-                # PRD 3.1 요구사항 충족
                 new_article = {
                     "id": str(uuid.uuid4()),
                     "url": news_url,
                     "title": metadata["title"],
                     "image_url": metadata["image_url"],
                     "category": news_category,
-                    "added_date": datetime.now() # 등록 날짜 자동 기록
+                    "added_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                st.session_state.news_list.append(new_article)
-                st.success(f"'{metadata['title']}' 뉴스를 성공적으로 등록했습니다!")
-                st.rerun() # 화면을 새로고침하여 목록에 즉시 반영
+                
+                # --- 핵심 변경점 3: Google Sheets에 새 행 추가하기 ---
+                try:
+                    updated_df = pd.DataFrame([new_article])
+                    conn.update(worksheet="Sheet1", data=pd.concat([existing_data, updated_df], ignore_index=True))
+                    st.success(f"'{metadata['title']}' 뉴스를 성공적으로 등록했습니다!")
+                    st.rerun() # 화면 새로고침
+                except Exception as e:
+                    st.error(f"뉴스 등록 중 오류가 발생했습니다: {e}")
             else:
-                st.error(metadata["error"])
+                st.error("뉴스 정보를 가져오는데 실패했습니다. URL을 확인해주세요.")
 
-
-# --- 3.2 & 6.1 뉴스 목록 표시 기능 ---
-if not st.session_state.news_list:
+# --- 뉴스 목록 표시 (기존 코드와 거의 동일) ---
+if not news_list:
     st.info("아직 등록된 뉴스가 없습니다. '새 뉴스 추가하기'를 통해 뉴스를 등록해주세요.")
 else:
     for category, color in CATEGORIES.items():
         st.markdown(f"---")
-        # 주제별 색상 구분 (PRD 4.2)
         st.subheader(f":{color}[{category}]")
 
-        # 주제별 뉴스 필터링 및 최신순 정렬 (PRD 3.2.1, 3.2.2)
-        category_news = [news for news in st.session_state.news_list if news["category"] == category]
-        sorted_news = sorted(category_news, key=lambda x: x['added_date'], reverse=True)
+        category_news = [news for news in news_list if news["category"] == category]
+        # 날짜 문자열을 datetime 객체로 변환하여 정렬
+        try:
+            sorted_news = sorted(category_news, key=lambda x: datetime.strptime(str(x['added_date']), "%Y-%m-%d %H:%M:%S"), reverse=True)
+        except (ValueError, TypeError): # 혹시 모를 데이터 오류 대비
+            sorted_news = category_news
 
         if not sorted_news:
             st.write("이 주제의 뉴스가 아직 없습니다.")
             continue
 
-        # 카드형 레이아웃 (PRD 3.2.3)
-        # 화면 너비에 따라 3개 또는 4개의 컬럼으로 표시
         cols = st.columns(3)
         for i, news in enumerate(sorted_news):
             col = cols[i % 3]
             with col:
-                # 카드 컨테이너
                 with st.container(border=True):
-                    # 6.2 뉴스 카드 구성 & 3.2.4 미리보기 이미지
-                    # 이미지가 없을 경우 주제별 기본 아이콘 대신 텍스트 메시지 표시
-                    if news["image_url"]:
+                    if pd.notna(news["image_url"]) and news["image_url"]:
                         st.image(news["image_url"])
                     else:
                         st.markdown(f"<p style='text-align: center; color: grey; padding: 20px 0;'>이미지 없음</p>", unsafe_allow_html=True)
                     
-                    # 큰 폰트 사이즈, 링크 이동 (PRD 4.1, 4.2, 3.3.1)
-                    # Streamlit의 마크다운 링크는 자동으로 새 탭에서 열림
-                    st.markdown(f"##### [{news['title']}]({news['url']})")
+                    st.markdown(f"##### [{str(news['title'])}]({str(news['url'])})")
                     
-                    # 등록 날짜 및 관리 기능 버튼
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        st.caption(f"등록: {news['added_date'].strftime('%Y-%m-%d %H:%M')}")
+                        st.caption(f"등록: {str(news['added_date'])}")
                     with col2:
-                        # 3.4.1 뉴스 삭제 기능
+                        # --- 핵심 변경점 4: 삭제 로직 수정 ---
                         if st.button("삭제", key=f"del_{news['id']}", type="secondary", use_container_width=True):
-                            st.session_state.news_list = [n for n in st.session_state.news_list if n['id'] != news['id']]
-                            st.rerun()
+                            try:
+                                news_to_delete_id = news['id']
+                                # 삭제할 행을 제외한 새로운 DataFrame 생성
+                                updated_data = existing_data[existing_data['id'] != news_to_delete_id]
+                                # 전체 시트 덮어쓰기
+                                conn.update(worksheet="Sheet1", data=updated_data)
+                                st.success("뉴스를 삭제했습니다.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"삭제 중 오류가 발생했습니다: {e}")
