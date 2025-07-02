@@ -7,3 +7,5 @@ requests
 beautifulsoup4
 streamlit-gsheets-connector
 pandas
+gspread
+oauth2client
